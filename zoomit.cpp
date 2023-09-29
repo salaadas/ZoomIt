@@ -81,6 +81,7 @@ struct V2 {
 };
 
 float scaleMagnitude = 1.0f;
+float deltaScale     = 0.0f;
 V2 mTranslate(0.0);
 V2 mPrev(0.0);
 V2 velocity(0.0);
@@ -93,8 +94,22 @@ V2 world(V2 vec)
     return (vec - mTranslate) / V2(scaleMagnitude);
 }
 
+template<typename T>
+T sign(T i)
+{
+    return (i > 0.0) ? 1 : (i == 0) ? 0 : -1;
+}
+
 void update(double dt)
 {
+    if (fabs(deltaScale) > 0.5) {
+        V2 worldPoint0 = world(mouseCurrent);
+        scaleMagnitude += scaleMagnitude + deltaScale * dt; // should we put a constraint on the minimum scale???
+        V2 worldPoint1 = world(mouseCurrent);
+        mTranslate += worldPoint1 - worldPoint0;
+        deltaScale -= sign(deltaScale) * 5.0 * dt;
+    }
+
     if (!isDragging && velocity.len() > 20.0) {
         mTranslate += velocity * V2(dt);
         velocity   -= velocity.normalized() * V2(dt) * V2(100.0);
@@ -128,7 +143,7 @@ int main()
 
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    constexpr int TARGET_WIDTH = 1920 * 3/4,
+    constexpr int TARGET_WIDTH  = 1920 * 3/4,
                   TARGET_HEIGHT = 1080 * 3/4;
 
     SDL_Window *appWindow = SDL_CreateWindow("ZoomIt", 0, 0, TARGET_WIDTH, TARGET_HEIGHT, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
@@ -208,21 +223,10 @@ int main()
 
                 // Relating to zooming
                 case SDL_MOUSEWHEEL: {
-                    auto getRelMouse = [&]() {
-                        int x, y; SDL_GetMouseState(&x, &y);
-                        return V2(x, y);
-                    };
-                    V2 emo = getRelMouse();
                     if (e.wheel.y > 0) {
-                        V2 worldPoint0 = world(emo);
-                        scaleMagnitude += 0.1;
-                        V2 worldPoint1 = world(emo);
-                        mTranslate += worldPoint1 - worldPoint0;
+                        deltaScale += 1.0;
                     } else if (e.wheel.y < 0) {
-                        V2 worldPoint0 = world(emo);
-                        scaleMagnitude -= 0.1;
-                        V2 worldPoint1 = world(emo);
-                        mTranslate += worldPoint1 - worldPoint0;
+                        deltaScale -= 1.0;
                     }
                 } break;
 
