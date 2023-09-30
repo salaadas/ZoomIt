@@ -1,9 +1,9 @@
-// https://tronche.com/gui/x/xlib/function-index.html
+// NEXT GOAL -> refactor code
+
 #include <cmath>
 #include <cassert>
-#include <X11/Xlib.h>
+#include <X11/Xlib.h> // ----> https://tronche.com/gui/x/xlib/function-index.html
 #include <X11/Xutil.h>
-#include <X11/extensions/Xrandr.h>
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -208,9 +208,6 @@ void update(double dt)
 }
 
 void render(Screenshoot &scroot, GLuint program, GLuint VAO, GLuint textures) {
-    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
     glBindTexture(GL_TEXTURE_2D, textures);
     glUseProgram(program);
 
@@ -220,6 +217,22 @@ void render(Screenshoot &scroot, GLuint program, GLuint VAO, GLuint textures) {
     glUniform2f(glGetUniformLocation(program, "lampPos"), Mouse::current.x, Mouse::current.y);
     glUniform1f(glGetUniformLocation(program, "radius"), Lamp::radius);
     glUniform1f(glGetUniformLocation(program, "shadow"), Lamp::shadow);
+
+    glBindVertexArray(VAO);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+}
+
+// time uniform, currently global
+namespace GloballyAvail
+{
+    float time;
+}
+void renderBG(GLuint program, GLuint VAO, GLuint textures)
+{
+    glBindTexture(GL_TEXTURE_2D, textures);
+    glUseProgram(program);
+
+    glUniform1f(glGetUniformLocation(program, "iTime"), GloballyAvail::time);
 
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
@@ -294,6 +307,10 @@ int main()
     GLuint fragShader = loadShaderFromFile("frag.glsl", GL_FRAGMENT_SHADER);
     GLuint programShader = linkProgram(vertShader, fragShader);
 
+    GLuint bgVS = loadShaderFromFile("bg.vert", GL_VERTEX_SHADER);
+    GLuint bgFS = loadShaderFromFile("bg.frag", GL_FRAGMENT_SHADER);
+    GLuint bgProg = linkProgram(bgVS, bgFS);
+
     GLfloat texCoords[] = {
         // positions         // colors          // texture coords
          1.0f,  1.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f, // top right
@@ -307,6 +324,7 @@ int main()
         1, 2, 3
     };
 
+    // screenshoot
     GLuint vertexBufferObject, vertexArrayObject, elementBufferObject;
     glGenBuffers(1, &vertexBufferObject);
     glGenVertexArrays(1, &vertexArrayObject);
@@ -356,10 +374,10 @@ int main()
 
     SDL_StartTextInput();
     bool quit = false;
-
     uint64_t lastTick = 0;
     uint64_t currentTick = SDL_GetPerformanceCounter();
     double deltaTime = 0;
+    GloballyAvail::time = 0;
     while (!quit) {
         glViewport(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
         SDL_Event e;
@@ -425,8 +443,13 @@ int main()
         currentTick = SDL_GetPerformanceCounter();
         deltaTime = (double)((currentTick - lastTick) / (double)SDL_GetPerformanceFrequency());
         update(deltaTime);
+        GloballyAvail::time += deltaTime;
 
         // rendering
+        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        renderBG(bgProg, vertexArrayObject, textures);
         render(scroot, programShader, vertexArrayObject, textures);
         SDL_GL_SwapWindow(appWindow);
     }
