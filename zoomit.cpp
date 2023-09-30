@@ -5,10 +5,71 @@
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrandr.h>
 #include <iostream>
+#include <string>
+#include <fstream>
 #include <cstdlib>
 
 #include <SDL.h>
+#include <GL/glew.h>
 #include <SDL_opengl.h>
+#include <GL/glext.h>
+#include <GL/glu.h>
+
+GLuint compileShader(const char *shaderSource, GLenum shaderType)
+{
+    GLuint shader = glCreateShader(shaderType);
+    if (shader == 0) {
+        fprintf(stderr, "ERROR: Could not create shader\n");
+        exit(1);
+    }
+
+    glShaderSource(shader, 1, &shaderSource, 0);
+    glCompileShader(shader);
+
+    GLint compileStatus; glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
+    if (!compileStatus) {
+        GLchar buffer[1024]; int length;
+        glGetShaderInfoLog(shader, sizeof(buffer), &length, buffer);
+        fprintf(stderr, "ERROR: Could not compile shader because of:\n%s\n", buffer);
+        exit(1);
+    }
+
+    return shader;
+}
+
+GLuint loadShaderFromFile(std::string fp, GLenum shaderType)
+{
+    std::ifstream fs(fp, std::ifstream::in);
+    std::string res("");
+    for (std::string line; fs.good(); ) {
+        std::getline(fs, line);
+        res.insert(res.length(), line);
+        res.insert(res.length(), "\n");
+    }
+    fs.close();
+    return compileShader(res.c_str(), shaderType);
+}
+
+GLuint linkProgram(GLuint vertShader, GLuint fragShader)
+{
+    GLuint program = glCreateProgram();
+    if (!program) {
+        fprintf(stderr, "ERROR: Could not create shader program\n");
+        exit(1);
+    }
+    glAttachShader(program, vertShader);
+    glAttachShader(program, fragShader);
+    glLinkProgram(program);
+    GLint linkStatus;
+    glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+    if (!linkStatus) {
+        GLchar buffer[1024]; int length;
+        glGetProgramInfoLog(program, sizeof(buffer), &length, buffer);
+        fprintf(stderr, "ERROR: Could not link shader program because of:\n%s\n", buffer);
+        exit(1);
+    }
+    return program;
+}
 
 struct Screenshoot {
     Display *display;
@@ -80,53 +141,99 @@ struct V2 {
     }
 };
 
-float scaleMagnitude = 1.0f;
-float deltaScale     = 0.0f;
-V2 mTranslate(0.0);
-V2 mPrev(0.0);
-V2 velocity(0.0);
-V2 mouseCurrent(0.0);
-V2 mousePrev(0.0);
-bool isDragging = false;
-
-V2 world(V2 vec)
+namespace Mouse
 {
-    return (vec - mTranslate) / V2(scaleMagnitude);
+    V2 current(0.0), previous(0.0);
+    bool isDragging      = false;
+    float scaleMagnitude = 1.0f,
+          deltaScale     = 0.0f;
+}
+
+namespace Camera
+{
+    V2 p(0.0); // position for the top left corner of the camera
+    V2 velocity(0.0);
+    V2 scalePivot(0.0);
+}
+
+#define INITIAL_RAD (60.0f)
+namespace Lamp
+{
+    bool isEnabled = false;
+    float radius   = INITIAL_RAD;
+    float deltaRad = 0.0f;
+    float shadow   = 0.0f;
 }
 
 template<typename T>
 T sign(T i)
 {
-    return (i > 0.0) ? 1 : (i == 0) ? 0 : -1;
+    return (i >= 0.0) ? 1 : -1;
+}
+
+V2 world(V2 vec)
+{
+    return (vec - Camera::p) / V2(Mouse::scaleMagnitude);
 }
 
 void update(double dt)
 {
-    if (fabs(deltaScale) > 0.5) {
-        V2 worldPoint0 = world(mouseCurrent);
-        scaleMagnitude += scaleMagnitude + deltaScale * dt; // should we put a constraint on the minimum scale???
-        V2 worldPoint1 = world(mouseCurrent);
-        mTranslate += worldPoint1 - worldPoint0;
-        deltaScale -= sign(deltaScale) * 5.0 * dt;
+    if (fabs(Mouse::deltaScale) > 0.5) {
+        V2 worldPoint0        = world(Mouse::current);
+        // should we put a constraint on the minimum scale???
+        Mouse::scaleMagnitude += Mouse::deltaScale * dt;
+        if (Mouse::scaleMagnitude < 0.5) {
+            Mouse::scaleMagnitude = 0.5;
+            Mouse::deltaScale     = 0.0;
+        } else {
+            V2 worldPoint1     = world(Mouse::current);
+            Camera::p         += worldPoint1 - worldPoint0;
+            Mouse::deltaScale -= sign(Mouse::deltaScale) * 5.0 * dt;
+        }
     }
+    if (!Mouse::isDragging && Camera::velocity.len() > 20.0) {
+        Camera::p        += Camera::velocity * V2(5 * dt);
+        Camera::velocity -= Camera::velocity.normalized() * V2(dt) * V2(100.0);
+    }
+    // lamp
+    if (abs(Lamp::deltaRad) > 1.0) {
+        Lamp::radius    = std::max(0.0, Lamp::radius + Lamp::deltaRad * dt);
+        Lamp::deltaRad -= Lamp::deltaRad * 10.0 * dt;
+    }
+    if (Lamp::isEnabled) {
+        Lamp::shadow = std::min(Lamp::shadow + 6.0 * dt, 0.8);
+    } else {
+        Lamp::shadow = std::max(Lamp::shadow - 6.0 * dt, 0.0);
+    }
+}
 
-    if (!isDragging && velocity.len() > 20.0) {
-        mTranslate += velocity * V2(dt);
-        velocity   -= velocity.normalized() * V2(dt) * V2(100.0);
-    }
+void render(Screenshoot &scroot, GLuint program, GLuint VAO, GLuint textures) {
+    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glBindTexture(GL_TEXTURE_2D, textures);
+    glUseProgram(program);
+
+    glUniform2f(glGetUniformLocation(program, "camera"), Camera::p.x, Camera::p.y);
+    glUniform1f(glGetUniformLocation(program, "scale"), Mouse::scaleMagnitude);
+    glUniform2f(glGetUniformLocation(program, "imgSize"), scroot.width, scroot.height);
+    glUniform2f(glGetUniformLocation(program, "lampPos"), Mouse::current.x, Mouse::current.y);
+    glUniform1f(glGetUniformLocation(program, "radius"), Lamp::radius);
+    glUniform1f(glGetUniformLocation(program, "shadow"), Lamp::shadow);
+
+    glBindVertexArray(VAO);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 }
 
 int main()
 {
     Display *display;
-
     display = XOpenDisplay(nullptr);
     if (display == nullptr) {
         std::cerr << "ERROR: could not open display" << std::endl;
         exit(1);
     }
     Window root = DefaultRootWindow(display);
-
     XWindowAttributes attributes;
     XGetWindowAttributes(display, root, &attributes);
 
@@ -141,10 +248,11 @@ int main()
         exit(1);
     }
 
+    SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE );
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    constexpr int TARGET_WIDTH  = 1920 * 3/4,
-                  TARGET_HEIGHT = 1080 * 3/4;
+    const int TARGET_WIDTH  = attributes.width,
+              TARGET_HEIGHT = attributes.height;
 
     SDL_Window *appWindow = SDL_CreateWindow("ZoomIt", 0, 0, TARGET_WIDTH, TARGET_HEIGHT, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
     if (appWindow == nullptr) {
@@ -157,27 +265,72 @@ int main()
     // opengl context
     SDL_GLContext appContext = SDL_GL_CreateContext(appWindow);
     if (appContext == nullptr) {
-        fprintf(stderr, "ERROR: could not create SDL GL context\n");
+        fprintf(stderr, "ERROR: could not create SDL GL context: %s\n", SDL_GetError());
         exit(1);
     }
 
     if (SDL_GL_MakeCurrent(appWindow, appContext) < 0) {
-        fprintf(stderr, "ERROR: could not create make context current\n");
+        fprintf(stderr, "ERROR: could not create make context current: %s\n", SDL_GetError());
         exit(1);
     }
 
-
     if (SDL_GL_SetSwapInterval(1) < 0) {
         fprintf(stderr, "WARNING: unable to set VSync: %s\n", SDL_GetError());
+        exit(1);
     }
 
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
+    GLenum glewInitStatus = glewInit();
+    if (glewInitStatus != GLEW_OK) {
+        fprintf(stderr, "ERROR: could not init glew\n");
+        exit(1);
+    }
 
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    if (!GLEW_VERSION_2_1) {
+        fprintf(stderr, "ERROR: need glew to be >= 2.1\n");
+        exit(1);
+    }
 
-    GLuint textures = 0;
+    GLuint vertShader = loadShaderFromFile("vert.glsl", GL_VERTEX_SHADER);
+    GLuint fragShader = loadShaderFromFile("frag.glsl", GL_FRAGMENT_SHADER);
+    GLuint programShader = linkProgram(vertShader, fragShader);
+
+    GLfloat texCoords[] = {
+        // positions         // colors          // texture coords
+         1.0f,  1.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f, // top right
+         1.0f, -1.0f, 0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f, // bottom right
+        -1.0f, -1.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f, // bottom left
+        -1.0f,  1.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 0.0f  // top left
+    };
+
+    GLuint indices[] = {
+        0, 1, 3,
+        1, 2, 3
+    };
+
+    GLuint vertexBufferObject, vertexArrayObject, elementBufferObject;
+    glGenBuffers(1, &vertexBufferObject);
+    glGenVertexArrays(1, &vertexArrayObject);
+    glGenBuffers(1, &elementBufferObject);
+
+    glBindVertexArray(vertexArrayObject);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vertexBufferObject);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(texCoords), texCoords, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, elementBufferObject);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+    // position attribute
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    // color attribute
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    // texture coord attribute
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    GLuint textures;
     glGenTextures(1, &textures);
     glBindTexture(GL_TEXTURE_2D, textures);
     glTexImage2D(GL_TEXTURE_2D,
@@ -189,23 +342,17 @@ int main()
                  GL_BGRA,
                  GL_UNSIGNED_BYTE,
                  scroot.data);
-    glEnable(GL_TEXTURE_2D);
-
-    glOrtho(0,
-            static_cast<GLfloat>(scroot.width),
-            static_cast<GLfloat>(scroot.height),
-            0,
-            -1.0, 1.0);
-
     glTexParameteri(GL_TEXTURE_2D,
                     GL_TEXTURE_MIN_FILTER,
                     GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D,
                     GL_TEXTURE_MAG_FILTER,
                     GL_NEAREST);
+    glEnable(GL_TEXTURE_2D);
 
-    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     glViewport(0, 0, scroot.width, scroot.height);
+
+    glUseProgram(programShader);
 
     SDL_StartTextInput();
     bool quit = false;
@@ -216,7 +363,6 @@ int main()
     while (!quit) {
         glViewport(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
         SDL_Event e;
-        uint32_t startTick = SDL_GetTicks();
         while (SDL_PollEvent(&e)) {
             switch (e.type) {
                 case SDL_QUIT: {quit = true; break;}
@@ -224,39 +370,51 @@ int main()
                 // Relating to zooming
                 case SDL_MOUSEWHEEL: {
                     if (e.wheel.y > 0) {
-                        deltaScale += 1.0;
+                        if ((SDL_GetModState() & KMOD_CTRL) && Lamp::isEnabled) {
+                            Lamp::deltaRad += INITIAL_RAD;
+                        } else {
+                            Mouse::deltaScale += 1.0;
+                            Camera::scalePivot = Mouse::current;
+                        }
                     } else if (e.wheel.y < 0) {
-                        deltaScale -= 1.0;
+                        if ((SDL_GetModState() & KMOD_CTRL) && Lamp::isEnabled) {
+                            Lamp::deltaRad -= INITIAL_RAD;
+                        } else {
+                            Mouse::deltaScale -= 1.0;
+                            Camera::scalePivot = Mouse::current;
+                        }
                     }
                 } break;
 
                 // Relating to panning
                 case SDL_MOUSEBUTTONDOWN: {
-                    mousePrev = mouseCurrent;
-                    isDragging = true;
+                    Mouse::previous = Mouse::current;
+                    Mouse::isDragging = true;
                 } break;
                 case SDL_MOUSEBUTTONUP: {
-                    isDragging = false;
+                    Mouse::isDragging = false;
                 } break;
                 case SDL_MOUSEMOTION: {
-                    if (isDragging) {
-                        mTranslate += world(mouseCurrent) - world(mousePrev);
-                        velocity = (mouseCurrent - mousePrev) * V2(20.0);
-                        mousePrev = mouseCurrent;
+                    if (Mouse::isDragging) {
+                        Camera::p += world(Mouse::current) - world(Mouse::previous);
+                        Camera::velocity = (Mouse::current - Mouse::previous) * V2(20.0);
+                        Mouse::previous = Mouse::current;
                     }
-                    mouseCurrent.x = e.motion.x;
-                    mouseCurrent.y = e.motion.y;
+                    Mouse::current.x = e.motion.x;
+                    Mouse::current.y = e.motion.y;
                 } break;
 
                 case SDL_TEXTINPUT: {
                     if (e.text.text[0] == 'q') quit = true;
-                    if (e.text.text[0] == 'w') {scaleMagnitude += 0.1;}
-                    if (e.text.text[0] == 's') {scaleMagnitude -= 0.1;}
                     if (e.text.text[0] == '0') {
-                        mousePrev      = V2(0.0);
-                        mTranslate     = V2(0.0);
-                        mouseCurrent   = V2(0.0);
-                        scaleMagnitude = 1.0;
+                        Mouse::previous       = V2(0.0);
+                        Mouse::current        = V2(0.0);
+                        Mouse::scaleMagnitude = 1.0;
+                        Camera::p             = V2(0.0);
+                        Camera::velocity      = V2(0.0);
+                    }
+                    if (e.text.text[0] == 'f') {
+                        Lamp::isEnabled = !Lamp::isEnabled;
                     }
                 } break;
             }
@@ -266,36 +424,17 @@ int main()
         lastTick = currentTick;
         currentTick = SDL_GetPerformanceCounter();
         deltaTime = (double)((currentTick - lastTick) / (double)SDL_GetPerformanceFrequency());
-        // printf("%f\n", deltaTime);
         update(deltaTime);
 
         // rendering
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        glPushMatrix();
-
-        glScalef(scaleMagnitude, scaleMagnitude, 1.0);
-        glTranslatef(mTranslate.x, mTranslate.y, 0.0);
-
-        glBegin(GL_QUADS);
-        glTexCoord2i(0, 0);
-        glVertex2f(0, 0);
-
-        glTexCoord2i(1, 0);
-        glVertex2f(scroot.width,  0.0);
-
-        glTexCoord2i(1, 1);
-        glVertex2f(scroot.width,  scroot.height);
-
-        glTexCoord2i(0, 1);
-        glVertex2f(0.0, scroot.height);
-        glEnd();
-
-        glFlush();
-        glPopMatrix();
-
+        render(scroot, programShader, vertexArrayObject, textures);
         SDL_GL_SwapWindow(appWindow);
     }
+
+    glDeleteVertexArrays(1, &vertexArrayObject);
+    glDeleteBuffers(1, &vertexBufferObject);
+    glDeleteBuffers(1, &elementBufferObject);
+
     SDL_StopTextInput();
     SDL_DestroyWindow(appWindow);
     SDL_Quit();
