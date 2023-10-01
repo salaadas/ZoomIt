@@ -1,13 +1,16 @@
 // NEXT GOAL -> refactor code
 
-#include <cmath>
-#include <cassert>
 #include <X11/Xlib.h> // ----> https://tronche.com/gui/x/xlib/function-index.html
 #include <X11/Xutil.h>
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <functional>
 #include <iostream>
 #include <string>
-#include <fstream>
-#include <cstdlib>
+#include <vector>
 
 #include <SDL.h>
 #include <GL/glew.h>
@@ -15,60 +18,9 @@
 #include <GL/glext.h>
 #include <GL/glu.h>
 
-GLuint compileShader(const char *shaderSource, GLenum shaderType)
+namespace GloballyAvail
 {
-    GLuint shader = glCreateShader(shaderType);
-    if (shader == 0) {
-        fprintf(stderr, "ERROR: Could not create shader\n");
-        exit(1);
-    }
-
-    glShaderSource(shader, 1, &shaderSource, 0);
-    glCompileShader(shader);
-
-    GLint compileStatus; glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
-    if (!compileStatus) {
-        GLchar buffer[1024]; int length;
-        glGetShaderInfoLog(shader, sizeof(buffer), &length, buffer);
-        fprintf(stderr, "ERROR: Could not compile shader because of:\n%s\n", buffer);
-        exit(1);
-    }
-
-    return shader;
-}
-
-GLuint loadShaderFromFile(std::string fp, GLenum shaderType)
-{
-    std::ifstream fs(fp, std::ifstream::in);
-    std::string res("");
-    for (std::string line; fs.good(); ) {
-        std::getline(fs, line);
-        res.insert(res.length(), line);
-        res.insert(res.length(), "\n");
-    }
-    fs.close();
-    return compileShader(res.c_str(), shaderType);
-}
-
-GLuint linkProgram(GLuint vertShader, GLuint fragShader)
-{
-    GLuint program = glCreateProgram();
-    if (!program) {
-        fprintf(stderr, "ERROR: Could not create shader program\n");
-        exit(1);
-    }
-    glAttachShader(program, vertShader);
-    glAttachShader(program, fragShader);
-    glLinkProgram(program);
-    GLint linkStatus;
-    glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
-    if (!linkStatus) {
-        GLchar buffer[1024]; int length;
-        glGetProgramInfoLog(program, sizeof(buffer), &length, buffer);
-        fprintf(stderr, "ERROR: Could not link shader program because of:\n%s\n", buffer);
-        exit(1);
-    }
-    return program;
+    float time = 0;
 }
 
 struct Screenshoot {
@@ -207,35 +159,181 @@ void update(double dt)
     }
 }
 
-void render(Screenshoot &scroot, GLuint program, GLuint VAO, GLuint textures) {
-    glBindTexture(GL_TEXTURE_2D, textures);
-    glUseProgram(program);
-
-    glUniform2f(glGetUniformLocation(program, "camera"), Camera::p.x, Camera::p.y);
-    glUniform1f(glGetUniformLocation(program, "scale"), Mouse::scaleMagnitude);
-    glUniform2f(glGetUniformLocation(program, "imgSize"), scroot.width, scroot.height);
-    glUniform2f(glGetUniformLocation(program, "lampPos"), Mouse::current.x, Mouse::current.y);
-    glUniform1f(glGetUniformLocation(program, "radius"), Lamp::radius);
-    glUniform1f(glGetUniformLocation(program, "shadow"), Lamp::shadow);
-
-    glBindVertexArray(VAO);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-}
-
-// time uniform, currently global
-namespace GloballyAvail
+namespace Gfx
 {
-    float time;
-}
-void renderBG(GLuint program, GLuint VAO, GLuint textures)
-{
-    glBindTexture(GL_TEXTURE_2D, textures);
-    glUseProgram(program);
+    enum Program {
+        P_SCENE = 0,
+        P_DESKTOP,
+        P_COUNT
+    };
 
-    glUniform1f(glGetUniformLocation(program, "iTime"), GloballyAvail::time);
+    enum Uniforms {
+        U_IMG_SZ = 0,
+        U_SCREEN_SCALE,
+        U_CAMERA,
+        U_TIME,
+        U_LAMP_POS,
+        U_LAMP_SHADOW,
+        U_LAMP_RADIUS,
+        U_COUNT
+    };
 
-    glBindVertexArray(VAO);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    static_assert(U_COUNT == 7, "Update list of uniforms");
+    static const char *uName[U_COUNT] = {
+        [U_IMG_SZ]       = "imgSize",
+        [U_SCREEN_SCALE] = "scale",
+        [U_CAMERA]       = "camera",
+        [U_TIME]         = "iTime",
+        [U_LAMP_POS]     = "lampPos",
+        [U_LAMP_SHADOW]  = "shadow",
+        [U_LAMP_RADIUS]  = "radius",
+    };
+    enum VertexAttrib {
+        VA_POS = 0,
+        VA_COLOR,
+        VA_TEXCOORD,
+        VA_COUNT
+    };
+    enum Textures {
+        TEX_DESKTOP = 0,
+        TEX_COUNT
+    };
+
+    GLuint vao, vbo, ebo;
+    GLuint texID;
+
+    GLfloat vbData[] = {
+        // positions         // colors          // texture coords
+         1.0f,  1.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f, // top right
+         1.0f, -1.0f, 0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f, // bottom right
+        -1.0f, -1.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f, // bottom left
+        -1.0f,  1.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 0.0f  // top left
+    };
+
+    GLuint indices[] = {
+        0, 1, 3,
+        1, 2, 3
+    };
+
+    void initVertexAttrib(GLenum usage, std::function<void()> &&fn)
+    {
+        glGenVertexArrays(1, &vao);
+        glGenBuffers     (1, &vbo);
+        glGenBuffers     (1, &ebo);
+
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vbData), vbData, usage);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, usage);
+
+        fn(); // let user set which data coreespond to which section
+
+        printf("Init vertex attributes successfully\n");
+    }
+
+    void initTexture(void *data, V2 &&dimensions)
+    {
+        glGenTextures(1, &texID);
+        glBindTexture(GL_TEXTURE_2D, texID);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGB,
+                     dimensions.x,
+                     dimensions.y,
+                     0,
+                     GL_BGRA,
+                     GL_UNSIGNED_BYTE,
+                     data);
+        glTexParameteri(GL_TEXTURE_2D,
+                        GL_TEXTURE_MIN_FILTER,
+                        GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,
+                        GL_TEXTURE_MAG_FILTER,
+                        GL_NEAREST);
+        glEnable(GL_TEXTURE_2D);
+        printf("Init texture successfully\n");
+    }
+
+    GLuint compileShader(const char *shaderSource, GLenum shaderType)
+    {
+        GLuint shader = glCreateShader(shaderType);
+        if (shader == 0) {
+            fprintf(stderr, "ERROR: Could not create shader\n");
+            exit(1);
+        }
+        glShaderSource(shader, 1, &shaderSource, 0);
+        glCompileShader(shader);
+
+        GLint compileStatus; glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
+        if (!compileStatus) {
+            GLchar buffer[1024]; int length;
+            glGetShaderInfoLog(shader, sizeof(buffer), &length, buffer);
+            fprintf(stderr, "ERROR: Could not compile shader because of:\n%s\n", buffer);
+            exit(1);
+        }
+        printf("Compiled shader successfully\n");
+        return shader;
+    }
+
+    GLuint loadShaderFromFile(std::string fp, GLenum shaderType)
+    {
+        std::ifstream fs(fp, std::ifstream::in);
+        std::string res("");
+        for (std::string line; fs.good(); ) {
+            std::getline(fs, line);
+            res.insert(res.length(), line);
+            res.insert(res.length(), "\n");
+        }
+        fs.close();
+        printf("Load shader from %s successfully\n", fp.c_str());
+        return compileShader(res.c_str(), shaderType);
+    }
+
+    GLuint linkProgram(GLuint &vertShader, GLuint &fragShader)
+    {
+        GLuint program = glCreateProgram();
+        if (!program) {
+            fprintf(stderr, "ERROR: Could not create shader program\n");
+            exit(1);
+        }
+        glAttachShader(program, vertShader);
+        glAttachShader(program, fragShader);
+        glLinkProgram(program);
+        GLint linkStatus;
+        glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+        if (!linkStatus) {
+            GLchar buffer[1024]; int length;
+            glGetProgramInfoLog(program, sizeof(buffer), &length, buffer);
+            fprintf(stderr, "ERROR: Could not link shader program because of:\n%s\n", buffer);
+            exit(1);
+        }
+              printf("Link program successfully\n");
+        return program;
+    }
+
+    GLuint createProgram(const char *vertPath, const char *fragPath)
+    {
+        GLuint vs = loadShaderFromFile(vertPath, GL_VERTEX_SHADER);
+        GLuint fs = loadShaderFromFile(fragPath, GL_FRAGMENT_SHADER);
+        return linkProgram(vs, fs);
+              printf("Create program successfully\n");
+    }
+
+    void renderAll(std::vector<std::function<void()>> fns)
+    {
+        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        std::for_each(fns.begin(), fns.end(), [](std::function<void()> f) {f();});
+    }
+
+    void cleanup()
+    {
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+        glDeleteBuffers(1, &ebo);
+        printf("Clean up successfully\n");
+    }
 }
 
 int main()
@@ -303,81 +401,36 @@ int main()
         exit(1);
     }
 
-    GLuint vertShader = loadShaderFromFile("vert.glsl", GL_VERTEX_SHADER);
-    GLuint fragShader = loadShaderFromFile("frag.glsl", GL_FRAGMENT_SHADER);
-    GLuint programShader = linkProgram(vertShader, fragShader);
+    GLuint programs[Gfx::P_COUNT];
+    programs[Gfx::P_SCENE]   = Gfx::createProgram("shaders/bg.vert", "shaders/bg.frag");
+    programs[Gfx::P_DESKTOP] = Gfx::createProgram("shaders/screen.vert", "shaders/screen.frag");
 
-    GLuint bgVS = loadShaderFromFile("bg.vert", GL_VERTEX_SHADER);
-    GLuint bgFS = loadShaderFromFile("bg.frag", GL_FRAGMENT_SHADER);
-    GLuint bgProg = linkProgram(bgVS, bgFS);
+    Gfx::initVertexAttrib(GL_STATIC_DRAW, []() {
+        // position
+        glVertexAttribPointer(Gfx::VA_POS, 3,
+        GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(Gfx::VA_POS);
+        // color attribute
+        glVertexAttribPointer(Gfx::VA_COLOR, 3,
+        GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(Gfx::VA_COLOR);
+        // texture coord attribute
+        glVertexAttribPointer(Gfx::VA_TEXCOORD, 2,
+        GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+        glEnableVertexAttribArray(Gfx::VA_TEXCOORD);
+    });
 
-    GLfloat texCoords[] = {
-        // positions         // colors          // texture coords
-         1.0f,  1.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f, // top right
-         1.0f, -1.0f, 0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f, // bottom right
-        -1.0f, -1.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f, // bottom left
-        -1.0f,  1.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 0.0f  // top left
-    };
-
-    GLuint indices[] = {
-        0, 1, 3,
-        1, 2, 3
-    };
-
-    // screenshoot
-    GLuint vertexBufferObject, vertexArrayObject, elementBufferObject;
-    glGenBuffers(1, &vertexBufferObject);
-    glGenVertexArrays(1, &vertexArrayObject);
-    glGenBuffers(1, &elementBufferObject);
-
-    glBindVertexArray(vertexArrayObject);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vertexBufferObject);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(texCoords), texCoords, GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, elementBufferObject);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
-    // position attribute
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // color attribute
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    // texture coord attribute
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-    glEnableVertexAttribArray(2);
-
-    GLuint textures;
-    glGenTextures(1, &textures);
-    glBindTexture(GL_TEXTURE_2D, textures);
-    glTexImage2D(GL_TEXTURE_2D,
-                 0,
-                 GL_RGB,
-                 scroot.width,
-                 scroot.height,
-                 0,
-                 GL_BGRA,
-                 GL_UNSIGNED_BYTE,
-                 scroot.data);
-    glTexParameteri(GL_TEXTURE_2D,
-                    GL_TEXTURE_MIN_FILTER,
-                    GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D,
-                    GL_TEXTURE_MAG_FILTER,
-                    GL_NEAREST);
-    glEnable(GL_TEXTURE_2D);
+    Gfx::initTexture(scroot.data, V2(scroot.width, scroot.height));
 
     glViewport(0, 0, scroot.width, scroot.height);
-
-    glUseProgram(programShader);
+    glUseProgram(programs[Gfx::P_DESKTOP]);
 
     SDL_StartTextInput();
     bool quit = false;
     uint64_t lastTick = 0;
     uint64_t currentTick = SDL_GetPerformanceCounter();
     double deltaTime = 0;
-    GloballyAvail::time = 0;
+
     while (!quit) {
         glViewport(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
         SDL_Event e;
@@ -446,17 +499,32 @@ int main()
         GloballyAvail::time += deltaTime;
 
         // rendering
-        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        renderBG(bgProg, vertexArrayObject, textures);
-        render(scroot, programShader, vertexArrayObject, textures);
+        using namespace Gfx;
+        Gfx::renderAll({
+            [&]() {
+                glBindTexture(GL_TEXTURE_2D, texID);
+                glUseProgram(programs[P_SCENE]);
+                glUniform1f(glGetUniformLocation(programs[P_SCENE], uName[U_TIME]), GloballyAvail::time);
+                glBindVertexArray(vao);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            },
+            [&]() {
+                glBindTexture(GL_TEXTURE_2D, texID);
+                glUseProgram(programs[P_DESKTOP]);
+                glUniform2f(glGetUniformLocation(programs[P_DESKTOP], uName[U_CAMERA]), Camera::p.x, Camera::p.y);
+                glUniform1f(glGetUniformLocation(programs[P_DESKTOP], uName[U_SCREEN_SCALE]), Mouse::scaleMagnitude);
+                glUniform2f(glGetUniformLocation(programs[P_DESKTOP], uName[U_IMG_SZ]), scroot.width, scroot.height);
+                glUniform2f(glGetUniformLocation(programs[P_DESKTOP], uName[U_LAMP_POS]), Mouse::current.x, Mouse::current.y);
+                glUniform1f(glGetUniformLocation(programs[P_DESKTOP], uName[U_LAMP_RADIUS]), Lamp::radius);
+                glUniform1f(glGetUniformLocation(programs[P_DESKTOP], uName[U_LAMP_SHADOW]), Lamp::shadow);
+                glBindVertexArray(vao);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            }
+        });
         SDL_GL_SwapWindow(appWindow);
     }
 
-    glDeleteVertexArrays(1, &vertexArrayObject);
-    glDeleteBuffers(1, &vertexBufferObject);
-    glDeleteBuffers(1, &elementBufferObject);
+    Gfx::cleanup();
 
     SDL_StopTextInput();
     SDL_DestroyWindow(appWindow);
